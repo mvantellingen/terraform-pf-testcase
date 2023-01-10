@@ -3,13 +3,22 @@ package hashicups
 import (
 	"context"
 
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+type dummyRemoteValue struct {
+	ID               string
+	ComputedValue    int
+	MyBoolean        bool
+	MyDefaultBoolean bool
+}
+
+var remoteValues = map[string]dummyRemoteValue{}
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -29,13 +38,10 @@ type orderResource struct {
 
 // orderResourceModel maps the resource schema data.
 type orderResourceModel struct {
-	ID      types.String  `tfsdk:"id"`
-	MyBlock *myBlockModel `tfsdk:"myblock"`
-}
-
-type myBlockModel struct {
-	Optional    types.Bool  `tfsdk:"optional"`
-	OptionalInt types.Int64 `tfsdk:"optional_int"`
+	ID               types.String `tfsdk:"id"`
+	ComputedValue    types.Int64  `tfsdk:"computed_value"`
+	MyBoolean        types.Bool   `tfsdk:"my_boolean"`
+	MyDefaultBoolean types.Bool   `tfsdk:"my_default_boolean"`
 }
 
 // Metadata returns the data source type name.
@@ -49,22 +55,23 @@ func (r *orderResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		Description: "Manages an order.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
-				Description: "Numeric identifier of the order.",
+				Description: "Identifier",
 				Computed:    true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
-				},
 			},
-		},
-		Blocks: map[string]schema.Block{
-			"myblock": schema.SingleNestedBlock{
-				Attributes: map[string]schema.Attribute{
-					"optional": schema.BoolAttribute{
-						Optional: true,
-					},
-					"optional_int": schema.Int64Attribute{
-						Optional: true,
-					},
+			"computed_value": schema.Int64Attribute{
+				Description: "Remote value.",
+				Computed:    true,
+			},
+			"my_boolean": schema.BoolAttribute{
+				Description: "Remote value.",
+				Required:    true,
+			},
+			"my_default_boolean": schema.BoolAttribute{
+				Description: "Remote value.",
+				Computed:    true,
+				Optional:    true,
+				PlanModifiers: []planmodifier.Bool{
+					BoolDefault(false),
 				},
 			},
 		},
@@ -88,13 +95,31 @@ func (r *orderResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	plan.ID = types.StringValue("1")
+	id, _ := uuid.GenerateUUID()
+	rv := dummyRemoteValue{
+		ID:               id,
+		ComputedValue:    1,
+		MyBoolean:        plan.MyBoolean.ValueBool(),
+		MyDefaultBoolean: plan.MyDefaultBoolean.ValueBool(),
+	}
+	remoteValues[id] = rv
+	state := r.transform(id)
 
 	// Set state to fully populated data
-	diags = resp.State.Set(ctx, plan)
+	diags = resp.State.Set(ctx, state)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+}
+
+func (r *orderResource) transform(id string) orderResourceModel {
+	rv := remoteValues[id]
+	return orderResourceModel{
+		ID:               types.StringValue(rv.ID),
+		ComputedValue:    types.Int64Value(int64(rv.ComputedValue)),
+		MyBoolean:        types.BoolValue(rv.MyBoolean),
+		MyDefaultBoolean: types.BoolValue(rv.MyDefaultBoolean),
 	}
 }
 
@@ -107,6 +132,8 @@ func (r *orderResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	state = r.transform(state.ID.ValueString())
 
 	// Set refreshed state
 	diags = resp.State.Set(ctx, &state)
@@ -126,7 +153,16 @@ func (r *orderResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
-	diags = resp.State.Set(ctx, plan)
+	id := plan.ID.ValueString()
+	rv := remoteValues[id]
+	rv.ComputedValue = rv.ComputedValue + 1
+	rv.MyBoolean = plan.MyBoolean.ValueBool()
+	rv.MyDefaultBoolean = plan.MyDefaultBoolean.ValueBool()
+	remoteValues[id] = rv
+
+	state := r.transform(id)
+
+	diags = resp.State.Set(ctx, state)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -143,6 +179,7 @@ func (r *orderResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
+	delete(remoteValues, state.ID.ValueString())
 }
 
 func (r *orderResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
